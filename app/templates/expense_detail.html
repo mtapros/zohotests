@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+{% if expense %}
+<h2>Expense {{ expense['zoho_expense_id'] }}</h2>
+<table>
+  <tbody>
+    <tr><th>Date</th><td>{{ expense['date'] or '' }}</td></tr>
+    <tr><th>Amount</th><td>{{ expense['amount'] if expense['amount'] is not none else '' }}</td></tr>
+    <tr><th>Vendor</th><td>{{ expense['vendor_name'] or '' }}</td></tr>
+    <tr><th>Description</th><td>{{ expense['description'] or '' }}</td></tr>
+    <tr><th>Reference Number</th><td>{{ expense['reference_number'] or '' }}</td></tr>
+    <tr><th>Imported At</th><td>{{ expense['imported_at'] }}</td></tr>
+  </tbody>
+</table>
+
+<h3>Flattened Fields</h3>
+<table>
+  <thead><tr><th>Field Path</th><th>Type</th><th>Value</th></tr></thead>
+  <tbody>
+    {% for field in fields %}
+      <tr>
+        <td>{{ field['field_path'] }}</td>
+        <td>{{ field['field_type'] }}</td>
+        <td>{{ field['field_value_text'] }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="3" class="muted">No flattened fields.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h3>Attachment Metadata</h3>
+<table>
+  <thead><tr><th>ID</th><th>File Name</th><th>Type</th><th>Metadata JSON</th></tr></thead>
+  <tbody>
+    {% for att in attachments %}
+      <tr>
+        <td>{{ att['attachment_id'] or '' }}</td>
+        <td>{{ att['file_name'] or '' }}</td>
+        <td>{{ att['attachment_type'] or '' }}</td>
+        <td><code>{{ att['metadata_json'] }}</code></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4" class="muted">No attachment metadata found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h3>Raw JSON</h3>
+<pre>{{ raw_pretty }}</pre>
+{% else %}
+<p>Expense not found.</p>
+{% endif %}
+{% endblock %}

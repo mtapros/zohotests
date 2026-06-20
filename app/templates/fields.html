@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Field Catalog</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Field Path</th>
+      <th>Seen In (# Expenses)</th>
+      <th>Type</th>
+      <th>Sample Value</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for field in fields %}
+    <tr>
+      <td>{{ field['field_path'] }}</td>
+      <td>{{ field['expense_count'] }}</td>
+      <td>{{ field['field_type'] }}</td>
+      <td>{{ field['sample_value'] or '' }}</td>
+    </tr>
+    {% else %}
+      <tr><td colspan="4" class="muted">No fields captured yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

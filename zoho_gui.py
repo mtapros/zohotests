@@ -900,7 +900,7 @@ class ForensicsApp:
                 orgs = client.test_organizations()
                 self.root.after(0, lambda: self.on_test_success(client, token_data, orgs))
             except Exception as exc:
-                self.root.after(0, lambda: self.on_import_error(exc))
+                self.root.after(0, lambda error=exc: self.on_import_error(error))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -933,7 +933,7 @@ class ForensicsApp:
                 result = import_expenses(self.db, client, max_pages=max_pages)
                 self.root.after(0, lambda: self.on_import_success(result))
             except Exception as exc:
-                self.root.after(0, lambda: self.on_import_error(exc))
+                self.root.after(0, lambda error=exc: self.on_import_error(error))
 
         threading.Thread(target=worker, daemon=True).start()
 

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zoho Expense Forensics</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 1.5rem; }
+    nav a { margin-right: 1rem; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+    th, td { border: 1px solid #ddd; padding: 0.5rem; vertical-align: top; }
+    th { background: #f8f8f8; text-align: left; }
+    pre { background: #111; color: #eee; padding: 1rem; overflow: auto; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Zoho Expense Forensic Inspector</h1>
+  <nav>
+    <a href="/expenses">Expenses</a>
+    <a href="/fields">Field Catalog</a>
+  </nav>
+  {% block content %}{% endblock %}
+</body>
+</html>

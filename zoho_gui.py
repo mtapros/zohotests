@@ -12,16 +12,27 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 APP_TITLE = "Zoho Expense Forensic Inspector"
 DEFAULT_DB_PATH = os.getenv("FORENSICS_DB_PATH", "forensics.db")
+DEFAULT_ACCOUNTS_DOMAIN = os.getenv("ZOHO_ACCOUNTS_DOMAIN", "https://accounts.zoho.com")
 DEFAULT_BASE_URL = os.getenv("ZOHO_BOOKS_BASE_URL", "https://www.zohoapis.com/books/v3")
+DEFAULT_API_DOMAIN = os.getenv("ZOHO_BOOKS_API_DOMAIN", "https://www.zohoapis.com")
 DEFAULT_ORG_ID = os.getenv("ZOHO_BOOKS_ORG_ID", "")
 DEFAULT_ACCESS_TOKEN = os.getenv("ZOHO_BOOKS_ACCESS_TOKEN", "")
+DEFAULT_CLIENT_ID = os.getenv("ZOHO_BOOKS_CLIENT_ID", "")
+DEFAULT_CLIENT_SECRET = os.getenv("ZOHO_BOOKS_CLIENT_SECRET", "")
+DEFAULT_REFRESH_TOKEN = os.getenv("ZOHO_BOOKS_REFRESH_TOKEN", "")
 DEFAULT_TIMEOUT_SECONDS = int(os.getenv("ZOHO_BOOKS_TIMEOUT_SECONDS", "30"))
 DEFAULT_SAMPLE_FILE = os.getenv("ZOHO_BOOKS_SAMPLE_FILE", "")
+
+
+class ZohoBooksError(Exception):
+    pass
 
 
 @dataclass
@@ -37,9 +48,14 @@ class ImportResult:
 @dataclass
 class Settings:
     db_path: str = DEFAULT_DB_PATH
+    accounts_domain: str = DEFAULT_ACCOUNTS_DOMAIN
     zoho_base_url: str = DEFAULT_BASE_URL
+    api_domain: str = DEFAULT_API_DOMAIN
     zoho_org_id: str = DEFAULT_ORG_ID
     zoho_access_token: str = DEFAULT_ACCESS_TOKEN
+    client_id: str = DEFAULT_CLIENT_ID
+    client_secret: str = DEFAULT_CLIENT_SECRET
+    refresh_token: str = DEFAULT_REFRESH_TOKEN
     zoho_timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     sample_file: str = DEFAULT_SAMPLE_FILE
 
@@ -341,44 +357,105 @@ def value_type(value: Any) -> str:
 
 
 class ZohoBooksClient:
-    def __init__(self, *, base_url: str, org_id: str, access_token: str, timeout_seconds: int = 30):
-        self.base_url = base_url.rstrip("/")
-        self.org_id = org_id
-        self.access_token = access_token
-        self.timeout_seconds = timeout_seconds
+    def __init__(
+        self,
+        accounts_domain: str,
+        client_id: str,
+        client_secret: str,
+        refresh_token: str,
+        organization_id: str,
+        api_domain: Optional[str] = None,
+        timeout: int = 30,
+        access_token: str = "",
+    ):
+        self.accounts_domain = (accounts_domain or DEFAULT_ACCOUNTS_DOMAIN).rstrip("/")
+        self.client_id = client_id or ""
+        self.client_secret = client_secret or ""
+        self.refresh_token = refresh_token or ""
+        self.organization_id = str(organization_id or "").strip()
+        self.api_domain = (api_domain or DEFAULT_API_DOMAIN).rstrip("/")
+        self.timeout = timeout
+        self._access_token = access_token or ""
 
-    def _request_json(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        if not self.org_id:
-            raise RuntimeError("ZOHO_BOOKS_ORG_ID is required for live Zoho import")
-        if not self.access_token:
-            raise RuntimeError("ZOHO_BOOKS_ACCESS_TOKEN is required for live Zoho import")
+    def _post_form(self, url: str, data: Dict[str, Any]) -> str:
+        payload = urllib.parse.urlencode(data).encode("utf-8")
+        req = Request(url, data=payload, method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        try:
+            with urlopen(req, timeout=self.timeout) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise ZohoBooksError(body or str(exc)) from exc
 
-        merged = dict(params)
-        merged["organization_id"] = self.org_id
-        query = urllib.parse.urlencode(merged)
-        url = f"{self.base_url}{path}?{query}"
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Authorization": f"Zoho-oauthtoken {self.access_token}",
-                "Accept": "application/json",
+    def _request_json(self, method: str, path: str, params: Optional[Dict[str, Any]] = None, payload: Any = None) -> Dict[str, Any]:
+        if not self._access_token:
+            if self.refresh_token and self.client_id and self.client_secret:
+                self.refresh_access_token()
+            elif not self._access_token:
+                raise ZohoBooksError("Need either an access token or client ID + client secret + refresh token.")
+
+        query = dict(params or {})
+        query["organization_id"] = self.organization_id
+        url = self.api_domain + path
+        if query:
+            url += "?" + urllib.parse.urlencode(query)
+
+        req = Request(url, method=method.upper())
+        req.add_header("Authorization", f"Zoho-oauthtoken {self._access_token}")
+        if payload is not None:
+            req.data = json.dumps(payload).encode("utf-8")
+            req.add_header("Content-Type", "application/json")
+
+        try:
+            with urlopen(req, timeout=self.timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise ZohoBooksError(body or str(exc)) from exc
+
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise ZohoBooksError(f"Unexpected Zoho response: {body}") from exc
+
+    def refresh_access_token(self) -> Dict[str, Any]:
+        token_url = self.accounts_domain + "/oauth/v2/token"
+        raw = self._post_form(
+            token_url,
+            {
+                "refresh_token": self.refresh_token,
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "grant_type": "refresh_token",
             },
         )
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ZohoBooksError(f"Unexpected token response: {raw}") from exc
 
-        with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-            body = response.read().decode("utf-8")
-            return json.loads(body)
+        token = data.get("access_token")
+        if not token:
+            raise ZohoBooksError(raw)
+        self._access_token = token
+        if data.get("api_domain"):
+            self.api_domain = str(data["api_domain"]).rstrip("/")
+        return data
 
     def list_expenses(self, page: int = 1, per_page: int = 200) -> Tuple[List[Dict[str, Any]], bool]:
-        payload = self._request_json("/expenses", {"page": page, "per_page": per_page})
+        payload = self._request_json("GET", "/books/v3/expenses", {"page": page, "per_page": per_page})
         expenses = payload.get("expenses", [])
         page_context = payload.get("page_context", {})
         has_more = bool(page_context.get("has_more_page"))
         return expenses, has_more
 
     def get_expense_detail(self, expense_id: str) -> Dict[str, Any]:
-        payload = self._request_json(f"/expenses/{expense_id}", {})
+        payload = self._request_json("GET", f"/books/v3/expenses/{expense_id}", {})
         return payload.get("expense", payload)
+
+    def test_organizations(self) -> Dict[str, Any]:
+        return self._request_json("GET", "/books/v3/organizations", params={})
 
 
 class SampleZohoBooksClient:
@@ -410,10 +487,14 @@ def build_zoho_client(current_settings: Settings):
     if current_settings.sample_file.strip():
         return SampleZohoBooksClient(current_settings.sample_file.strip())
     return ZohoBooksClient(
-        base_url=current_settings.zoho_base_url,
-        org_id=current_settings.zoho_org_id,
+        accounts_domain=current_settings.accounts_domain,
+        client_id=current_settings.client_id,
+        client_secret=current_settings.client_secret,
+        refresh_token=current_settings.refresh_token,
+        organization_id=current_settings.zoho_org_id,
+        api_domain=current_settings.api_domain,
+        timeout=current_settings.zoho_timeout_seconds,
         access_token=current_settings.zoho_access_token,
-        timeout_seconds=current_settings.zoho_timeout_seconds,
     )
 
 
@@ -520,7 +601,7 @@ class ForensicsApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("1400x900")
+        self.root.geometry("1450x950")
 
         self.settings = Settings()
         self.db = ForensicsDB(self.settings.db_path)
@@ -530,9 +611,14 @@ class ForensicsApp:
 
         self.status_var = tk.StringVar(value="Ready")
         self.db_path_var = tk.StringVar(value=self.settings.db_path)
+        self.accounts_domain_var = tk.StringVar(value=self.settings.accounts_domain)
         self.base_url_var = tk.StringVar(value=self.settings.zoho_base_url)
+        self.api_domain_var = tk.StringVar(value=self.settings.api_domain)
         self.org_id_var = tk.StringVar(value=self.settings.zoho_org_id)
         self.access_token_var = tk.StringVar(value=self.settings.zoho_access_token)
+        self.client_id_var = tk.StringVar(value=self.settings.client_id)
+        self.client_secret_var = tk.StringVar(value=self.settings.client_secret)
+        self.refresh_token_var = tk.StringVar(value=self.settings.refresh_token)
         self.timeout_var = tk.StringVar(value=str(self.settings.zoho_timeout_seconds))
         self.sample_file_var = tk.StringVar(value=self.settings.sample_file)
         self.max_pages_var = tk.StringVar(value="")
@@ -558,23 +644,36 @@ class ForensicsApp:
         ttk.Entry(top, textvariable=self.sample_file_var).grid(row=1, column=1, columnspan=4, sticky="ew", padx=(0, 6), pady=(6, 0))
         ttk.Button(top, text="Browse JSON", command=self.choose_sample).grid(row=1, column=5, sticky="ew", pady=(6, 0))
 
-        ttk.Label(top, text="Zoho Base URL").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(top, textvariable=self.base_url_var).grid(row=2, column=1, sticky="ew", padx=(0, 6), pady=(6, 0))
-        ttk.Label(top, text="Org ID").grid(row=2, column=2, sticky="w", pady=(6, 0))
-        ttk.Entry(top, textvariable=self.org_id_var).grid(row=2, column=3, sticky="ew", padx=(0, 6), pady=(6, 0))
-        ttk.Label(top, text="Timeout").grid(row=2, column=4, sticky="w", pady=(6, 0))
-        ttk.Entry(top, textvariable=self.timeout_var).grid(row=2, column=5, sticky="ew", pady=(6, 0))
+        ttk.Label(top, text="Accounts Domain").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(top, textvariable=self.accounts_domain_var).grid(row=2, column=1, sticky="ew", padx=(0, 6), pady=(6, 0))
+        ttk.Label(top, text="API Domain").grid(row=2, column=2, sticky="w", pady=(6, 0))
+        ttk.Entry(top, textvariable=self.api_domain_var).grid(row=2, column=3, sticky="ew", padx=(0, 6), pady=(6, 0))
+        ttk.Label(top, text="Org ID").grid(row=2, column=4, sticky="w", pady=(6, 0))
+        ttk.Entry(top, textvariable=self.org_id_var).grid(row=2, column=5, sticky="ew", pady=(6, 0))
 
-        ttk.Label(top, text="Access Token").grid(row=3, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(top, textvariable=self.access_token_var, show="*").grid(row=3, column=1, columnspan=3, sticky="ew", padx=(0, 6), pady=(6, 0))
-        ttk.Label(top, text="Max Pages").grid(row=3, column=4, sticky="w", pady=(6, 0))
-        ttk.Entry(top, textvariable=self.max_pages_var).grid(row=3, column=5, sticky="ew", pady=(6, 0))
+        ttk.Label(top, text="Client ID").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(top, textvariable=self.client_id_var).grid(row=3, column=1, sticky="ew", padx=(0, 6), pady=(6, 0))
+        ttk.Label(top, text="Client Secret").grid(row=3, column=2, sticky="w", pady=(6, 0))
+        ttk.Entry(top, textvariable=self.client_secret_var, show="*").grid(row=3, column=3, sticky="ew", padx=(0, 6), pady=(6, 0))
+        ttk.Label(top, text="Timeout").grid(row=3, column=4, sticky="w", pady=(6, 0))
+        ttk.Entry(top, textvariable=self.timeout_var).grid(row=3, column=5, sticky="ew", pady=(6, 0))
+
+        ttk.Label(top, text="Refresh Token").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(top, textvariable=self.refresh_token_var, show="*").grid(row=4, column=1, columnspan=3, sticky="ew", padx=(0, 6), pady=(6, 0))
+        ttk.Label(top, text="Access Token (optional)").grid(row=4, column=4, sticky="w", pady=(6, 0))
+        ttk.Entry(top, textvariable=self.access_token_var, show="*").grid(row=4, column=5, sticky="ew", pady=(6, 0))
+
+        ttk.Label(top, text="Legacy Base URL").grid(row=5, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(top, textvariable=self.base_url_var).grid(row=5, column=1, columnspan=3, sticky="ew", padx=(0, 6), pady=(6, 0))
+        ttk.Label(top, text="Max Pages").grid(row=5, column=4, sticky="w", pady=(6, 0))
+        ttk.Entry(top, textvariable=self.max_pages_var).grid(row=5, column=5, sticky="ew", pady=(6, 0))
 
         buttons = ttk.Frame(top)
-        buttons.grid(row=4, column=0, columnspan=6, sticky="ew", pady=(10, 0))
+        buttons.grid(row=6, column=0, columnspan=6, sticky="ew", pady=(10, 0))
         ttk.Button(buttons, text="Apply Settings", command=self.apply_settings).pack(side="left")
-        ttk.Button(buttons, text="Run Import", command=self.run_import).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Refresh", command=self.refresh_all).pack(side="left")
+        ttk.Button(buttons, text="Test Token / Org", command=self.test_connection).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Run Import", command=self.run_import).pack(side="left")
+        ttk.Button(buttons, text="Refresh", command=self.refresh_all).pack(side="left", padx=6)
 
         notebook = ttk.Notebook(self.root)
         notebook.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
@@ -755,9 +854,14 @@ class ForensicsApp:
 
         self.settings = Settings(
             db_path=self.db_path_var.get().strip() or DEFAULT_DB_PATH,
+            accounts_domain=self.accounts_domain_var.get().strip() or DEFAULT_ACCOUNTS_DOMAIN,
             zoho_base_url=self.base_url_var.get().strip() or DEFAULT_BASE_URL,
+            api_domain=self.api_domain_var.get().strip() or DEFAULT_API_DOMAIN,
             zoho_org_id=self.org_id_var.get().strip(),
             zoho_access_token=self.access_token_var.get().strip(),
+            client_id=self.client_id_var.get().strip(),
+            client_secret=self.client_secret_var.get().strip(),
+            refresh_token=self.refresh_token_var.get().strip(),
             zoho_timeout_seconds=timeout,
             sample_file=self.sample_file_var.get().strip(),
         )
@@ -774,6 +878,44 @@ class ForensicsApp:
         if value <= 0:
             raise ValueError("Max pages must be greater than zero.")
         return value
+
+    def test_connection(self) -> None:
+        try:
+            self.apply_settings()
+        except Exception:
+            return
+
+        self.status_var.set("Testing Zoho connection...")
+
+        def worker() -> None:
+            try:
+                client = build_zoho_client(self.settings)
+                if isinstance(client, SampleZohoBooksClient):
+                    self.root.after(0, lambda: messagebox.showinfo("Offline mode", "Sample JSON mode is enabled. No Zoho connection test needed."))
+                    self.root.after(0, lambda: self.status_var.set("Sample JSON mode active"))
+                    return
+                token_data = None
+                if self.settings.refresh_token and self.settings.client_id and self.settings.client_secret:
+                    token_data = client.refresh_access_token()
+                orgs = client.test_organizations()
+                self.root.after(0, lambda: self.on_test_success(client, token_data, orgs))
+            except Exception as exc:
+                self.root.after(0, lambda: self.on_import_error(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_test_success(self, client: ZohoBooksClient, token_data: Optional[Dict[str, Any]], orgs: Dict[str, Any]) -> None:
+        if getattr(client, "api_domain", ""):
+            self.api_domain_var.set(client.api_domain)
+        org_count = len(orgs.get("organizations", []) or [])
+        token_note = ""
+        if token_data and token_data.get("api_domain"):
+            token_note = f"\nResolved API domain: {token_data['api_domain']}"
+        self.status_var.set(f"Zoho connection OK. Organizations returned: {org_count}")
+        messagebox.showinfo(
+            "Zoho connection OK",
+            f"Connection succeeded.\nOrganizations returned: {org_count}{token_note}",
+        )
 
     def run_import(self) -> None:
         try:
@@ -808,9 +950,9 @@ class ForensicsApp:
         )
 
     def on_import_error(self, exc: Exception) -> None:
-        self.status_var.set(f"Import failed: {exc}")
+        self.status_var.set(f"Request failed: {exc}")
         self.refresh_all()
-        messagebox.showerror("Import failed", str(exc))
+        messagebox.showerror("Request failed", str(exc))
 
     def refresh_all(self) -> None:
         self.refresh_expenses()
@@ -922,7 +1064,7 @@ class ForensicsApp:
 
 def main() -> None:
     root = tk.Tk()
-    app = ForensicsApp(root)
+    ForensicsApp(root)
     root.mainloop()
 
 
